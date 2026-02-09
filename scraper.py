@@ -120,14 +120,13 @@ class DomainsScrapperSelenium:
                 cookies = json.load(f)
             self.driver.get(self.base_url)
             time.sleep(2)
+            self.driver.delete_all_cookies()
             for cookie in cookies:
-                # Remove problematic fields that can cause errors
-                for key in ['sameSite', 'expiry']:
-                    cookie.pop(key, None)
+                cookie.pop('sameSite', None)
                 try:
                     self.driver.add_cookie(cookie)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"    cookie skip: {cookie.get('name')}: {e}")
             print(f"  ✓ Cookies loaded ({len(cookies)} cookies)")
             return True
         except Exception as e:
