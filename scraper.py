@@ -536,6 +536,16 @@ if __name__ == "__main__":
 
             if len(domains) > 20:
                 print(f"  ... and {len(domains) - 20} more")
+
+            # Send success email in cron mode
+            if args.cron:
+                domain_list = "\n".join(domains)
+                send_alert_email(
+                    f"Domains Scrapper: {len(domains)} domains collected",
+                    f"Successfully collected {len(domains)} domains.\n"
+                    f"{'Database: saved' if db_connected else 'Database: not connected (files only)'}\n\n"
+                    f"--- Domain list ---\n{domain_list}"
+                )
         else:
             print("\n✗ No domains collected")
             if args.cron:
