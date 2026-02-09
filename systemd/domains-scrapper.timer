@@ -1,0 +1,10 @@
+[Unit]
+Description=Domains Scrapper daily timer (randomized)
+
+[Timer]
+OnCalendar=*-*-* 06:00:00
+RandomizedDelaySec=14h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Domains Scrapper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/opt/scraper
+ExecStart=/opt/scraper/run.sh
+TimeoutStartSec=300
