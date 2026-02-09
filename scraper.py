@@ -13,6 +13,7 @@ import json
 import argparse
 import requests as http_requests
 from datetime import date
+import calendar
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -210,6 +211,31 @@ class DomainsScrapperSelenium:
             self.db_conn.rollback()
             return False
     
+    def get_yearly_summary(self):
+        """Get a summary of days covered in the current year from the database"""
+        if not self.db_conn:
+            return None
+        try:
+            cursor = self.db_conn.cursor()
+            year = date.today().year
+            days_in_year = 366 if calendar.isleap(year) else 365
+            cursor.execute("""
+                SELECT COUNT(DISTINCT expiry_date)
+                FROM domains
+                WHERE expiry_date >= %s AND expiry_date <= %s
+            """, (f"{year}-01-01", f"{year}-12-31"))
+            days_covered = cursor.fetchone()[0]
+            cursor.close()
+            return {
+                "year": year,
+                "days_in_year": days_in_year,
+                "days_covered": days_covered,
+                "days_remaining": days_in_year - days_covered,
+            }
+        except Exception as e:
+            print(f"  ✗ Error getting yearly summary: {str(e)}")
+            return None
+
     def is_logged_in(self):
         """Check if we're currently logged in"""
         try:
@@ -536,12 +562,20 @@ if __name__ == "__main__":
 
             # Send success email in cron mode
             if args.cron:
-                domain_list = "\n".join(domains)
+                body = (
+                    f"Successfully collected {len(domains)} domains.\n"
+                    f"{'Database: saved' if db_connected else 'Database: not connected (files only)'}"
+                )
+                summary = scraper.get_yearly_summary()
+                if summary:
+                    body += (
+                        f"\n\n--- {summary['year']} coverage ---\n"
+                        f"Days covered: {summary['days_covered']}/{summary['days_in_year']}\n"
+                        f"Days remaining: {summary['days_remaining']}"
+                    )
                 send_alert_email(
                     f"Domains Scrapper: {len(domains)} domains collected",
-                    f"Successfully collected {len(domains)} domains.\n"
-                    f"{'Database: saved' if db_connected else 'Database: not connected (files only)'}\n\n"
-                    f"--- Domain list ---\n{domain_list}"
+                    body
                 )
         else:
             print("\n✗ No domains collected")
