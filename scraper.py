@@ -482,11 +482,8 @@ if __name__ == "__main__":
                 send_alert_email(
                     "Domains Scrapper: login required",
                     "The session has expired and manual login is needed.\n\n"
-                    "SSH into the EC2 instance with X11 forwarding and run:\n"
-                    "  ssh -X user@ec2-host\n"
-                    "  cd /path/to/collect-domains\n"
-                    "  source venv/bin/activate\n"
-                    "  python scraper.py\n\n"
+                    "Run this command to login:\n\n"
+                    '  ssh -X ubuntu@wg.2l.ro -t "cd /opt/scraper && source venv/bin/activate && python scraper.py"\n\n'
                     "Complete the login in the browser, then the cron job will "
                     "work again on the next scheduled run."
                 )
