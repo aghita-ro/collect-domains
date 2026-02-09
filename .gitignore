@@ -2,6 +2,7 @@
 venv/
 chrome_profile/
 eureg_session.pkl
+cookies.json
 domains.txt
 domains_*.txt
 debug_*.html

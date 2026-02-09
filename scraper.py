@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 import time
 import os
+import json
 import argparse
 import requests as http_requests
 from datetime import date
@@ -98,7 +99,41 @@ class DomainsScrapperSelenium:
         self.driver = webdriver.Chrome(service=service, options=chrome_options)
         self.wait = WebDriverWait(self.driver, 30)
         print(f"✓ Using profile: {self.profile_dir}")
-    
+        self.cookies_file = os.path.join(os.getcwd(), "cookies.json")
+
+    def save_cookies(self):
+        """Save browser cookies to file"""
+        try:
+            cookies = self.driver.get_cookies()
+            with open(self.cookies_file, 'w') as f:
+                json.dump(cookies, f)
+            print(f"  ✓ Cookies saved ({len(cookies)} cookies)")
+        except Exception as e:
+            print(f"  ✗ Failed to save cookies: {str(e)}")
+
+    def load_cookies(self):
+        """Load cookies from file into browser"""
+        if not os.path.exists(self.cookies_file):
+            return False
+        try:
+            with open(self.cookies_file, 'r') as f:
+                cookies = json.load(f)
+            self.driver.get(self.base_url)
+            time.sleep(2)
+            for cookie in cookies:
+                # Remove problematic fields that can cause errors
+                for key in ['sameSite', 'expiry']:
+                    cookie.pop(key, None)
+                try:
+                    self.driver.add_cookie(cookie)
+                except Exception:
+                    pass
+            print(f"  ✓ Cookies loaded ({len(cookies)} cookies)")
+            return True
+        except Exception as e:
+            print(f"  ✗ Failed to load cookies: {str(e)}")
+            return False
+
     def connect_db(self):
         """Connect to PostgreSQL database"""
         if not PSYCOPG2_AVAILABLE:
@@ -180,6 +215,7 @@ class DomainsScrapperSelenium:
         """Check if we're currently logged in"""
         try:
             print("\nChecking login status...")
+            self.load_cookies()
             self.driver.get(f"{self.base_url}/ro/clienti/dashboard")
             time.sleep(3)
             
@@ -288,7 +324,7 @@ class DomainsScrapperSelenium:
                 if '/dashboard' in url_path or ('/login' not in url_path and '/conectare' not in url_path and '/clienti/' in url_path):
                     print(f"\n✓ Login successful! (took {i+1} seconds)")
                     print(f"  Final URL: {current_url}")
-                    print("\n✓ Session saved in Chrome profile!")
+                    self.save_cookies()
                     print("  Next run will skip login automatically.")
                     return True
                 
