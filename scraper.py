@@ -220,21 +220,42 @@ class DomainsScrapperSelenium:
             year = date.today().year
             days_in_year = 366 if calendar.isleap(year) else 365
             cursor.execute("""
-                SELECT COUNT(DISTINCT expiry_date)
+                SELECT expiry_date, COUNT(*) AS domain_count
                 FROM domains
                 WHERE expiry_date >= %s AND expiry_date <= %s
+                GROUP BY expiry_date
+                ORDER BY expiry_date
             """, (f"{year}-01-01", f"{year}-12-31"))
-            days_covered = cursor.fetchone()[0]
+            rows = cursor.fetchall()
+            days_covered = len(rows)
             cursor.close()
             return {
                 "year": year,
                 "days_in_year": days_in_year,
                 "days_covered": days_covered,
                 "days_remaining": days_in_year - days_covered,
+                "daily_counts": rows,
             }
         except Exception as e:
             print(f"  ✗ Error getting yearly summary: {str(e)}")
             return None
+
+    def print_yearly_summary(self):
+        """Display the yearly coverage summary on screen"""
+        summary = self.get_yearly_summary()
+        if not summary:
+            return
+        print("\n" + "="*50)
+        print(f"YEARLY COVERAGE — {summary['year']}")
+        print("="*50)
+        for expiry_date, count in summary["daily_counts"]:
+            print(f"  {expiry_date}  —  {count} domains")
+        print("-"*50)
+        pct = summary['days_covered'] / summary['days_in_year'] * 100
+        print(f"  Days covered:   {summary['days_covered']}/{summary['days_in_year']} ({pct:.1f}%)")
+        print(f"  Days remaining: {summary['days_remaining']}")
+        print("="*50)
+        return summary
 
     def is_logged_in(self):
         """Check if we're currently logged in"""
@@ -560,14 +581,16 @@ if __name__ == "__main__":
             if len(domains) > 20:
                 print(f"  ... and {len(domains) - 20} more")
 
+            # Show yearly coverage summary
+            summary = scraper.print_yearly_summary() if db_connected else None
+
             # Send success email in cron mode
             if args.cron:
                 body = (
                     f"Successfully collected {len(domains)} domains.\n"
                     f"{'Database: saved' if db_connected else 'Database: not connected (files only)'}"
                 )
-                summary = scraper.get_yearly_summary()
-                if summary:
+                if db_connected and summary:
                     body += (
                         f"\n\n--- {summary['year']} coverage ---\n"
                         f"Days covered: {summary['days_covered']}/{summary['days_in_year']}\n"
@@ -579,6 +602,8 @@ if __name__ == "__main__":
                 )
         else:
             print("\n✗ No domains collected")
+            if db_connected:
+                scraper.print_yearly_summary()
             if args.cron:
                 send_alert_email(
                     "Domains Scrapper: no domains collected",
@@ -599,6 +624,4 @@ if __name__ == "__main__":
             )
     finally:
         if scraper:
-            if not args.cron:
-                input("\nPress Enter to close browser...")
             scraper.close()
