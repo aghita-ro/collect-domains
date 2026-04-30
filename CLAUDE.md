@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Single-script Python scraper (`scraper.py`) that collects expiring `.ro` domain names from an auction platform. It uses Selenium with Chrome to handle login (which requires manual CAPTCHA/email verification), paginates through a DataTables-based auction list, and saves results both to text files and a PostgreSQL database.
+Single-script Python scraper (`scraper.py`) that collects expiring `.ro` domain names from the eureg.ro auction platform. It uses Selenium with Chrome to handle login (which requires manual CAPTCHA/email verification), paginates through a DataTables-based auction list, and saves results both to text files and a PostgreSQL database.
+
+There are no tests, linters, or build steps. The project is a single Python script with a venv.
 
 ## Configuration
 
@@ -25,9 +27,15 @@ python scraper.py
 python scraper.py --cron
 ```
 
+## Installing Dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
 ## Deployment (EC2)
 
-Deployed to `/opt/scraper` on an Ubuntu 24.04 EC2 instance (also the WireGuard VPN server). Uses Google Chrome (not snap Chromium).
+Deployed to `/opt/scraper` on an Ubuntu 24.04 EC2 instance (also the WireGuard VPN server).
 
 - `setup-ec2.sh` — one-shot setup script (installs deps, clones repo, installs systemd timer)
 - `run.sh` — wrapper script that does `git pull --ff-only` then runs `python scraper.py --cron`
@@ -57,6 +65,10 @@ Everything lives in `scraper.py` within the `DomainsScrapperSelenium` class:
 - **Cron mode** (`--cron`): Runs headless (`--headless=new`). If the session is expired, sends an email alert via Mailgun and exits. Also alerts on 0 domains collected or unexpected errors.
 - **Domain collection**: `get_all_auction_domains()` navigates to the auction page with `?filter=today`, resets DataTables pagination via JavaScript, then loops through pages parsing the table with BeautifulSoup/lxml.
 - **Storage**: Domains are saved to `domains.txt` (overwritten each run), a timestamped `domains_YYYYMMDD_HHMMSS.txt` backup, and upserted into a PostgreSQL `domains` table with the current date as `expiry_date`.
+
+## Database Schema
+
+The PostgreSQL `domains` table has a `domain` column (unique) and an `expiry_date` column. The upsert uses `ON CONFLICT (domain) DO UPDATE SET expiry_date`.
 
 ## Key Dependencies
 
