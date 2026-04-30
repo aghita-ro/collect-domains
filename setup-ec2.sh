@@ -15,7 +15,7 @@ echo "=== Setting up Python venv ==="
 cd /opt/scraper
 python3 -m venv venv
 source venv/bin/activate
-pip install selenium webdriver-manager beautifulsoup4 lxml psycopg2-binary requests python-dotenv
+pip install -r requirements.txt
 
 echo "=== Creating .env ==="
 echo "Create /opt/scraper/.env with your credentials:"
