@@ -61,7 +61,7 @@ sudo systemctl start domains-scrapper.service      # manual trigger
 Everything lives in `scraper.py` within the `DomainsScrapperSelenium` class:
 
 - **Session management**: Cookies are saved to `cookies.json` after successful login and restored before each run. The Chrome profile (`chrome_profile/`) is also used but cookies.json is the primary session persistence mechanism (Chrome drops session cookies on exit).
-- **Login flow**: `login_manual()` fills credentials then waits up to 3 minutes for the user to complete email verification/CAPTCHA in the browser. Only runs in interactive mode.
+- **Login flow**: `login_manual()` fills credentials then waits up to 3 minutes for the user to complete email verification/CAPTCHA in the browser. Only runs in interactive mode. Credential fields are filled via the `_fill_field()` helper (JS `value=''` + Ctrl+A + Delete + `send_keys`) and Chrome autofill/password manager is disabled via `prefs` — plain `clear()` + `send_keys()` is not enough because the persistent Chrome profile re-autofills the field on focus, causing the typed value to be appended to the autofilled one.
 - **Cron mode** (`--cron`): Runs headless (`--headless=new`). If the session is expired, sends an email alert via Mailgun and exits. Also alerts on 0 domains collected or unexpected errors.
 - **Domain collection**: `get_all_auction_domains()` navigates to the auction page with `?filter=today`, resets DataTables pagination via JavaScript, then loops through pages parsing the table with BeautifulSoup/lxml.
 - **Storage**: Domains are saved to `domains.txt` (overwritten each run), a timestamped `domains_YYYYMMDD_HHMMSS.txt` backup, and upserted into a PostgreSQL `domains` table with the current date as `expiry_date`.

@@ -1,5 +1,6 @@
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
@@ -91,8 +92,16 @@ class DomainsScrapperSelenium:
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_argument("--disable-autofill")
+        chrome_options.add_argument("--disable-save-password-bubble")
         chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
         chrome_options.add_experimental_option('useAutomationExtension', False)
+        chrome_options.add_experimental_option("prefs", {
+            "credentials_enable_service": False,
+            "profile.password_manager_enabled": False,
+            "autofill.profile_enabled": False,
+            "autofill.credit_card_enabled": False,
+        })
         
         # Initialize driver
         print("Initializing Chrome with persistent profile...")
@@ -319,6 +328,16 @@ class DomainsScrapperSelenium:
         except:
             pass
     
+    def _fill_field(self, element, value):
+        # Chrome autofill from the persistent profile can repopulate the field
+        # after .clear(), causing send_keys to append to the autofilled value.
+        # Force-clear via JS + Ctrl+A/Delete before typing.
+        self.driver.execute_script("arguments[0].value = '';", element)
+        element.click()
+        element.send_keys(Keys.CONTROL, "a")
+        element.send_keys(Keys.DELETE)
+        element.send_keys(value)
+
     def login_manual(self):
         """Login with manual intervention for CAPTCHA/email verification"""
         try:
@@ -336,12 +355,10 @@ class DomainsScrapperSelenium:
             username_field = self.wait.until(
                 EC.presence_of_element_located((By.ID, "login"))
             )
-            username_field.clear()
-            username_field.send_keys(self.username)
-            
+            self._fill_field(username_field, self.username)
+
             password_field = self.driver.find_element(By.ID, "pass")
-            password_field.clear()
-            password_field.send_keys(self.password)
+            self._fill_field(password_field, self.password)
             
             print("Clicking login button...\n")
             login_button = self.driver.find_element(By.ID, "login-button")
