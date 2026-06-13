@@ -533,96 +533,58 @@ class DomainsScrapperSelenium:
             self.driver.quit()
 
 
-# Main execution
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Domains Scrapper")
-    parser.add_argument("--cron", action="store_true",
-                        help="Run in cron mode: headless, no manual login, email alert on failure")
-    args = parser.parse_args()
+def _save_domains_to_files(domains):
+    """Write domains to domains.txt + a timestamped archive under DATA_DIR."""
+    output_file = os.path.join(DATA_DIR, "domains.txt")
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    timestamped_file = os.path.join(DATA_DIR, f"domains_{timestamp}.txt")
+    for path in (output_file, timestamped_file):
+        with open(path, 'w', encoding='utf-8') as f:
+            for domain in domains:
+                f.write(f"{domain}\n")
+    print(f"\n✓ Saved {len(domains)} domains to:\n  - {output_file}\n  - {timestamped_file}")
+    return output_file, timestamped_file
 
-    USERNAME = os.getenv("SCRAPER_USERNAME", "")
-    PASSWORD = os.getenv("SCRAPER_PASSWORD", "")
 
-    # Change to script directory so chrome_profile and output files
-    # are always relative to the script, not the cron working directory
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
-
+def run_scrape_job(cron=True):
+    """Run one full scrape. Returns a result dict. Does NOT do interactive login;
+    if the session is expired it emails an alert and returns session_valid=False."""
+    username = os.getenv("SCRAPER_USERNAME", "")
+    password = os.getenv("SCRAPER_PASSWORD", "")
+    result = {"status": "error", "domains_count": 0, "session_valid": None, "error": None}
     scraper = None
-
     try:
-        # Initialize with persistent profile
-        scraper = DomainsScrapperSelenium(USERNAME, PASSWORD, headless=args.cron)
-
-        # Connect to database
+        scraper = DomainsScrapperSelenium(username, password, headless=False)
         db_connected = scraper.connect_db()
 
-        # Check if already logged in
-        if scraper.is_logged_in():
-            print("\n✓✓✓ Already logged in - skipping login! ✓✓✓")
-        else:
-            if args.cron:
-                # Cron mode: can't do manual login, send alert and exit
-                print("\n✗ Session expired - manual login required")
+        if not scraper.is_logged_in():
+            result["session_valid"] = False
+            result["status"] = "login_required"
+            print("\n✗ Session expired - manual login required")
+            if cron:
                 send_alert_email(
                     "Domains Scrapper: login required",
                     "The session has expired and manual login is needed.\n\n"
-                    "Run this command to login:\n\n"
-                    '  ssh -X ubuntu@wg.2l.ro -t "cd /opt/scraper && source venv/bin/activate && python scraper.py"\n\n'
-                    "Complete the login in the browser, then the cron job will "
-                    "work again on the next scheduled run."
+                    "Open the noVNC console (private/VPN), then trigger POST /login\n"
+                    "and complete the email verification / CAPTCHA in the browser.\n\n"
+                    "The next scheduled run will work again afterwards."
                 )
-                exit(1)
-            else:
-                print("\n⚠ Not logged in - manual login required")
-                if not scraper.login_manual():
-                    print("\n✗ Login failed - exiting")
-                    exit(1)
+            return result
 
-        # Collect domains
-        print("\n" + "="*50)
-        print("STARTING DOMAIN COLLECTION")
-        print("="*50)
-
+        result["session_valid"] = True
         domains = scraper.get_all_auction_domains()
 
-        # Save to database
         if domains and db_connected:
             scraper.save_domains_to_db(domains)
         elif domains and not db_connected:
             print("\n⚠ Database not connected - saving to files only")
 
-        # Save results to files (always, as backup)
         if domains:
-            output_file = "domains.txt"
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            timestamped_file = f"domains_{timestamp}.txt"
-
-            # Save to both files
-            with open(output_file, 'w', encoding='utf-8') as f:
-                for domain in domains:
-                    f.write(f"{domain}\n")
-
-            with open(timestamped_file, 'w', encoding='utf-8') as f:
-                for domain in domains:
-                    f.write(f"{domain}\n")
-
-            print(f"\n✓ Saved {len(domains)} domains to:")
-            print(f"  - {output_file}")
-            print(f"  - {timestamped_file}")
-
-            # Display sample
-            print("\nFirst 20 domains:")
-            for i, domain in enumerate(domains[:20], 1):
-                print(f"  {i}. {domain}")
-
-            if len(domains) > 20:
-                print(f"  ... and {len(domains) - 20} more")
-
-            # Show yearly coverage summary
+            _save_domains_to_files(domains)
             summary = scraper.print_yearly_summary() if db_connected else None
-
-            # Send success email in cron mode
-            if args.cron:
+            result["status"] = "ok"
+            result["domains_count"] = len(domains)
+            if cron:
                 body = (
                     f"Successfully collected {len(domains)} domains.\n"
                     f"{'Database: saved' if db_connected else 'Database: not connected (files only)'}"
@@ -633,32 +595,75 @@ if __name__ == "__main__":
                         f"Days covered: {summary['days_covered']}/{summary['days_in_year']}\n"
                         f"Days remaining: {summary['days_remaining']}"
                     )
-                send_alert_email(
-                    f"Domains Scrapper: {len(domains)} domains collected",
-                    body
-                )
+                send_alert_email(f"Domains Scrapper: {len(domains)} domains collected", body)
         else:
+            result["status"] = "no_domains"
             print("\n✗ No domains collected")
             if db_connected:
                 scraper.print_yearly_summary()
-            if args.cron:
+            if cron:
                 send_alert_email(
                     "Domains Scrapper: no domains collected",
                     "The scraper ran but collected 0 domains.\n"
                     "This may indicate a page structure change or a session issue."
                 )
+        return result
 
-    except KeyboardInterrupt:
-        print("\n\nInterrupted by user")
     except Exception as e:
+        result["error"] = str(e)
         print(f"\n✗ Unexpected error: {str(e)}")
         import traceback
         traceback.print_exc()
-        if args.cron:
+        if cron:
             send_alert_email(
                 "Domains Scrapper: unexpected error",
                 f"The scraper crashed with an error:\n\n{str(e)}"
             )
+        return result
     finally:
         if scraper:
             scraper.close()
+
+
+def run_login_job(wait_seconds=600):
+    """Open the browser for manual login (watch via noVNC). Returns a result dict."""
+    username = os.getenv("SCRAPER_USERNAME", "")
+    password = os.getenv("SCRAPER_PASSWORD", "")
+    result = {"success": False, "error": None}
+    scraper = None
+    try:
+        scraper = DomainsScrapperSelenium(username, password, headless=False)
+        if scraper.is_logged_in():
+            print("\n✓ Already logged in - nothing to do")
+            result["success"] = True
+            return result
+        result["success"] = scraper.login_manual(wait_seconds=wait_seconds)
+        return result
+    except Exception as e:
+        result["error"] = str(e)
+        import traceback
+        traceback.print_exc()
+        return result
+    finally:
+        if scraper:
+            scraper.close()
+
+
+# Main execution
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Domains Scrapper")
+    parser.add_argument("--cron", action="store_true",
+                        help="Run a scrape non-interactively, email alerts on failure")
+    parser.add_argument("--login", action="store_true",
+                        help="Open the browser for manual login (watch via noVNC)")
+    args = parser.parse_args()
+
+    try:
+        if args.login:
+            run_login_job(wait_seconds=600)
+        else:
+            # Default and --cron both run a scrape; interactive login is no longer
+            # done here (use --login or the /login endpoint instead).
+            run_scrape_job(cron=args.cron)
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user")
