@@ -1,3 +1,4 @@
+import hmac
 import os
 import random
 import threading
@@ -26,15 +27,17 @@ _state = {
 
 
 def _client_ip():
-    fwd = request.headers.get("X-Forwarded-For", "")
-    if fwd:
-        return fwd.split(",")[0].strip()
+    # Use the real peer address only. We do NOT trust X-Forwarded-For: cron.2l.ro
+    # calls the container directly (no proxy we control), so an attacker could
+    # otherwise spoof an allowlisted IP via that header. If a trusted reverse
+    # proxy is ever placed in front, add proxy-aware handling here deliberately.
     return request.remote_addr or ""
 
 
 def _token_ok():
     token = request.headers.get("X-Webhook-Token") or request.args.get("token", "")
-    return bool(WEBHOOK_TOKEN) and token == WEBHOOK_TOKEN
+    # Constant-time compare to avoid leaking the token via timing.
+    return bool(WEBHOOK_TOKEN) and hmac.compare_digest(token, WEBHOOK_TOKEN)
 
 
 def _ip_ok():
@@ -67,15 +70,23 @@ def health():
 
 @app.route("/run", methods=["POST"])
 def run():
-    if not _ip_ok():
-        return jsonify(error="forbidden"), 403
+    # Token first, then IP — so a bad-token caller can't probe allowlist membership.
     if not _token_ok():
         return jsonify(error="unauthorized"), 401
+    if not _ip_ok():
+        return jsonify(error="forbidden"), 403
     if not _lock.acquire(blocking=False):
         return jsonify(error="already running"), 409
-    _state["running"] = True
-    _state["last_run_started"] = time.strftime("%Y-%m-%d %H:%M:%S")
-    threading.Thread(target=_background_scrape, name="scrape-job", daemon=True).start()
+    try:
+        _state["running"] = True
+        _state["last_run_started"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        threading.Thread(target=_background_scrape, name="scrape-job", daemon=True).start()
+    except Exception:
+        # If the thread never started, the background finally-block won't run —
+        # release the lock here so we don't get stuck permanently at 409.
+        _state["running"] = False
+        _lock.release()
+        raise
     return jsonify(status="accepted"), 202
 
 
