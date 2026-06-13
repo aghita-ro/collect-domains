@@ -5,7 +5,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
+# webdriver-manager is only needed for local dev (auto-downloads chromedriver).
+# In the container we use the system chromedriver via CHROMEDRIVER_PATH, so the
+# import is deferred to __init__ to avoid a hard dependency in the image.
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 import time
@@ -17,7 +19,16 @@ from datetime import date
 import calendar
 from dotenv import load_dotenv
 
-load_dotenv()
+# Data directory: a mounted volume in the container, the script dir for local dev.
+# Holds .env, cookies.json, chrome_profile/, and domains*.txt output.
+DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+
+# Load .env from DATA_DIR if present, otherwise fall back to default search.
+_dotenv_path = os.path.join(DATA_DIR, ".env")
+if os.path.exists(_dotenv_path):
+    load_dotenv(_dotenv_path)
+else:
+    load_dotenv()
 
 # Mailgun configuration
 MAILGUN_DOMAIN = os.getenv("MAILGUN_DOMAIN", "")
@@ -69,20 +80,24 @@ def send_alert_email(subject, body):
 
 
 class DomainsScrapperSelenium:
-    def __init__(self, username, password, headless=False):
+    def __init__(self, username, password, headless=False, work_dir=None):
         self.username = username
         self.password = password
         self.base_url = "https://www.eureg.ro"
         self.db_conn = None
         
-        # Create a persistent profile directory
-        self.profile_dir = os.path.join(os.getcwd(), "chrome_profile")
+        # Create a persistent profile directory under the data dir
+        self.work_dir = work_dir or DATA_DIR
+        self.profile_dir = os.path.join(self.work_dir, "chrome_profile")
         if not os.path.exists(self.profile_dir):
             os.makedirs(self.profile_dir)
             print(f"Created profile directory: {self.profile_dir}")
         
         # Setup Chrome options with persistent profile
         chrome_options = Options()
+        chrome_bin = os.getenv("CHROME_BIN", "")
+        if chrome_bin:
+            chrome_options.binary_location = chrome_bin
         chrome_options.add_argument(f"user-data-dir={self.profile_dir}")
         chrome_options.add_argument("--profile-directory=Default")
         
@@ -105,11 +120,16 @@ class DomainsScrapperSelenium:
         
         # Initialize driver
         print("Initializing Chrome with persistent profile...")
-        service = Service(ChromeDriverManager().install())
+        chromedriver_path = os.getenv("CHROMEDRIVER_PATH", "")
+        if chromedriver_path:
+            service = Service(executable_path=chromedriver_path)
+        else:
+            from webdriver_manager.chrome import ChromeDriverManager
+            service = Service(ChromeDriverManager().install())
         self.driver = webdriver.Chrome(service=service, options=chrome_options)
         self.wait = WebDriverWait(self.driver, 30)
         print(f"✓ Using profile: {self.profile_dir}")
-        self.cookies_file = os.path.join(os.getcwd(), "cookies.json")
+        self.cookies_file = os.path.join(self.work_dir, "cookies.json")
 
     def save_cookies(self):
         """Save browser cookies to file"""
@@ -338,7 +358,7 @@ class DomainsScrapperSelenium:
         element.send_keys(Keys.DELETE)
         element.send_keys(value)
 
-    def login_manual(self):
+    def login_manual(self, wait_seconds=180):
         """Login with manual intervention for CAPTCHA/email verification"""
         try:
             print("\n" + "="*70)
@@ -371,11 +391,11 @@ class DomainsScrapperSelenium:
             print("  2. Enter the code in the browser")
             print("  3. Complete any CAPTCHA if needed")
             print("  4. Wait for redirect to dashboard")
-            print("\nScript will wait up to 3 minutes...")
+            print(f"\nScript will wait up to {wait_seconds // 60} minutes...")
             print("="*70 + "\n")
             
             # Wait for login completion
-            for i in range(180):
+            for i in range(wait_seconds):
                 time.sleep(1)
                 current_url = self.driver.current_url
                 
