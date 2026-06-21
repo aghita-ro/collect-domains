@@ -8,6 +8,8 @@
 #   WEB_PORT=8000                  host port for the webhook (/run, /health, /status, /login)
 #   NOVNC_PORT=7900                host port for the noVNC console
 #   NOVNC_BIND=127.0.0.1           interface noVNC binds to — keep it private! (VPN/tunnel only)
+#   RESTART=no                     Docker restart policy (no = do NOT start at boot; daily_run.sh
+#                                  owns the lifecycle). Set RESTART=unless-stopped for an always-on server.
 #
 # Login after start:
 #   (default)     auto — start the manual-login flow only when no saved session
@@ -61,7 +63,7 @@ fi
 echo "Starting '$CONTAINER' (image '$IMAGE', data '$DATA_DIR')..."
 docker run -d \
     --name "$CONTAINER" \
-    --restart unless-stopped \
+    --restart "${RESTART:-no}" \
     -p "${WEB_PORT}:8000" \
     -p "${NOVNC_BIND}:${NOVNC_PORT}:7900" \
     -v "$DATA_DIR:/data" \

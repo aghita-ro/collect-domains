@@ -61,9 +61,17 @@ pip install -r requirements.txt
 
 ## Deployment
 
-The container is host-agnostic. The daily run is triggered externally by cron.2l.ro, which issues `POST http://HOST:8000/run?token=...` on a schedule.
+The container is host-agnostic and supports two trigger models:
 
-- Webhook (`/run`) is protected by `WEBHOOK_TOKEN` + `WEBHOOK_ALLOWED_IPS` (the cron server's IP).
+**Always-on server:** run with `RESTART=unless-stopped ./docker_run.sh` (auto-starts at boot) and have an external scheduler issue `POST http://HOST:8000/run?token=...` on a schedule (e.g. cron.2l.ro — put its IP in `WEBHOOK_ALLOWED_IPS`).
+
+**Intermittent / workstation (default):** the container is NOT started at boot (`--restart no`). `daily_run.sh` owns its lifecycle and is run every ~5 min by cron:
+```
+*/5 * * * * /path/to/collect-domains/daily_run.sh >/dev/null 2>&1
+```
+It exits immediately if today already succeeded (marker file `data/.last_success_date`), otherwise starts the container, triggers `/run`, waits for it to finish, marks the day on `session_valid: true`, and stops the container again. Net effect: one successful scrape per day, within ~5 min of the machine being on, with the container off the rest of the time. A `flock` guards against overlapping ticks; activity is logged to `data/daily_run.log`.
+
+- Webhook (`/run`) is protected by `WEBHOOK_TOKEN` + `WEBHOOK_ALLOWED_IPS`.
 - noVNC (port 7900) MUST stay private — bind it to localhost/VPN only, never expose it publicly (it controls a logged-in browser).
 - Session persistence (`cookies.json`, `chrome_profile/`) and output (`domains*.txt`) live on the mounted `/data` volume and survive restarts.
 
