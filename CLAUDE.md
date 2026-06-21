@@ -16,7 +16,7 @@ All credentials are in `.env` (not committed). See `.env.example` for the full t
 - `SCRAPER_USERNAME` / `SCRAPER_PASSWORD` — auction platform login
 - `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` — PostgreSQL connection
 - `MAILGUN_DOMAIN`, `MAILGUN_API_KEY`, `EMAIL_FROM`, `EMAIL_TO` — Mailgun email alerts (EU endpoint: `api.eu.mailgun.net`)
-- `GMAIL_IMAP_USER`, `GMAIL_IMAP_PASSWORD`, `GMAIL_IMAP_HOST` — Gmail IMAP for auto-reading the eureg.ro 2FA login code. Use a Google **App Password** (needs 2-Step Verification), not the account password. When set, login completes the email 2FA step automatically (no manual code entry).
+- `GMAIL_IMAP_USER`, `GMAIL_IMAP_PASSWORD`, `GMAIL_IMAP_HOST` — Gmail IMAP for auto-reading the eureg.ro 2FA login code. Use a Google **App Password** (needs 2-Step Verification), not the account password. When set, login completes the email 2FA step automatically (no manual code entry). The same app password is reused for **outgoing email via Gmail SMTP** (`smtp.gmail.com:587`): `send_alert_email()` prefers Gmail SMTP (sending the daily run summary + alerts to `GMAIL_IMAP_USER`) and falls back to Mailgun only if Gmail isn't configured.
 - `WEBHOOK_TOKEN` — secret token required to call `/run`, `/status`, `/login`
 - `WEBHOOK_ALLOWED_IPS` — comma-separated IP allowlist for `/run` (empty = allow all)
 - `RANDOM_DELAY_MAX_MIN` — max random pre-scrape delay in minutes (0 = disabled)

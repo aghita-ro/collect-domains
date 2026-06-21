@@ -16,8 +16,10 @@ import json
 import argparse
 import re
 import imaplib
+import smtplib
 import email
 from email.utils import parsedate_to_datetime
+from email.mime.text import MIMEText
 import requests as http_requests
 from datetime import date
 import calendar
@@ -62,10 +64,33 @@ except ImportError:
     print("Warning: psycopg2 not installed. Database features disabled.")
 
 
-def send_alert_email(subject, body):
-    """Send an alert email via Mailgun API"""
+def _send_via_gmail_smtp(subject, body, to):
+    """Send a plain-text email through Gmail SMTP using the IMAP app password."""
+    msg = MIMEText(body, _charset="utf-8")
+    msg["Subject"] = subject
+    msg["From"] = GMAIL_IMAP_USER
+    msg["To"] = to
+    with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
+        s.starttls()
+        s.login(GMAIL_IMAP_USER, GMAIL_IMAP_PASSWORD)
+        s.sendmail(GMAIL_IMAP_USER, [to], msg.as_string())
+
+
+def send_alert_email(subject, body, to=None):
+    """Send an email. Prefers Gmail SMTP (reuses the IMAP app password, reliable);
+    falls back to the Mailgun API if Gmail isn't configured. Returns True on success.
+    The default recipient is the Gmail account itself (where the 2FA codes arrive)."""
+    if GMAIL_IMAP_USER and GMAIL_IMAP_PASSWORD:
+        recipient = to or GMAIL_IMAP_USER
+        try:
+            _send_via_gmail_smtp(subject, body, recipient)
+            print(f"✓ Email sent to {recipient} (Gmail SMTP)")
+            return True
+        except Exception as e:
+            print(f"✗ Gmail SMTP error: {str(e)} - falling back to Mailgun")
+
     if not MAILGUN_API_KEY or not MAILGUN_DOMAIN:
-        print("✗ Mailgun not configured - skipping email alert")
+        print("✗ No working email transport (Gmail SMTP failed, Mailgun not configured)")
         return False
     try:
         response = http_requests.post(
@@ -73,13 +98,13 @@ def send_alert_email(subject, body):
             auth=("api", MAILGUN_API_KEY),
             data={
                 "from": EMAIL_FROM,
-                "to": EMAIL_TO,
+                "to": to or EMAIL_TO,
                 "subject": subject,
                 "text": body,
             },
         )
         if response.status_code == 200:
-            print(f"✓ Alert email sent to {EMAIL_TO}")
+            print(f"✓ Alert email sent to {to or EMAIL_TO} (Mailgun)")
             return True
         else:
             print(f"✗ Mailgun error {response.status_code}: {response.text}")
@@ -275,10 +300,11 @@ class DomainsScrapperSelenium:
             return False
     
     def save_domains_to_db(self, domains):
-        """Save domains to database with current date as expiry_date"""
+        """Save domains to database with current date as expiry_date.
+        Returns a dict {inserted, updated, errors} on success, or None on failure."""
         if not self.db_conn:
             print("✗ No database connection - skipping database save")
-            return False
+            return None
         
         print("\n" + "="*50)
         print("SAVING TO DATABASE")
@@ -321,13 +347,13 @@ class DomainsScrapperSelenium:
             if errors > 0:
                 print(f"  ✗ Errors:   {errors}")
             print(f"  Date used:  {today}")
-            
-            return True
-            
+
+            return {"inserted": inserted, "updated": updated, "errors": errors}
+
         except Exception as e:
             print(f"\n✗ Database error: {str(e)}")
             self.db_conn.rollback()
-            return False
+            return None
     
     def get_yearly_summary(self):
         """Get a summary of days covered in the current year from the database"""
@@ -727,6 +753,39 @@ def _save_domains_to_files(domains):
     return output_file, timestamped_file
 
 
+def _build_summary_email(day, domains_count, db_connected, db_result, saved_files, summary):
+    """Build the plain-text daily run summary emailed after a successful scrape."""
+    lines = [
+        f"Rezumat execuție scraper domenii — {day}",
+        "",
+        f"Domenii colectate azi: {domains_count}",
+    ]
+    if not db_connected:
+        lines.append("Bază de date: NECONECTATĂ (salvat doar în fișiere)")
+    elif db_result is None:
+        lines.append("Bază de date: EROARE la salvare")
+    else:
+        line = (f"Bază de date: salvat cu succes — {db_result['inserted']} noi, "
+                f"{db_result['updated']} actualizate")
+        if db_result.get("errors"):
+            line += f", {db_result['errors']} erori"
+        lines.append(line)
+
+    if saved_files:
+        lines.append("Fișiere: " + ", ".join(os.path.basename(p) for p in saved_files))
+
+    if summary:
+        pct = summary["days_covered"] / summary["days_in_year"] * 100
+        lines += [
+            "",
+            f"Acoperire {summary['year']}: {summary['days_covered']}/{summary['days_in_year']} "
+            f"zile ({pct:.1f}%), rămase {summary['days_remaining']}",
+        ]
+
+    lines += ["", "— Scraper domenii eureg.ro (rulare automată)"]
+    return "\n".join(lines)
+
+
 def run_scrape_job(cron=True):
     """Run one full scrape. Returns a result dict. Does NOT do interactive login;
     if the session is expired it emails an alert and returns session_valid=False."""
@@ -756,38 +815,32 @@ def run_scrape_job(cron=True):
         result["session_valid"] = True
         domains = scraper.get_all_auction_domains()
 
+        db_result = None
         if domains and db_connected:
-            scraper.save_domains_to_db(domains)
+            db_result = scraper.save_domains_to_db(domains)
         elif domains and not db_connected:
             print("\n⚠ Database not connected - saving to files only")
 
         if domains:
-            _save_domains_to_files(domains)
+            saved_files = _save_domains_to_files(domains)
             summary = scraper.print_yearly_summary() if db_connected else None
             result["status"] = "ok"
             result["domains_count"] = len(domains)
             if cron:
-                body = (
-                    f"Successfully collected {len(domains)} domains.\n"
-                    f"{'Database: saved' if db_connected else 'Database: not connected (files only)'}"
+                send_alert_email(
+                    f"Scraper domenii — {date.today()}: {len(domains)} domenii",
+                    _build_summary_email(date.today(), len(domains), db_connected,
+                                         db_result, saved_files, summary),
                 )
-                if db_connected and summary:
-                    body += (
-                        f"\n\n--- {summary['year']} coverage ---\n"
-                        f"Days covered: {summary['days_covered']}/{summary['days_in_year']}\n"
-                        f"Days remaining: {summary['days_remaining']}"
-                    )
-                send_alert_email(f"Domains Scrapper: {len(domains)} domains collected", body)
         else:
             result["status"] = "no_domains"
             print("\n✗ No domains collected")
-            if db_connected:
-                scraper.print_yearly_summary()
+            summary = scraper.print_yearly_summary() if db_connected else None
             if cron:
                 send_alert_email(
-                    "Domains Scrapper: no domains collected",
-                    "The scraper ran but collected 0 domains.\n"
-                    "This may indicate a page structure change or a session issue."
+                    f"Scraper domenii — {date.today()}: 0 domenii",
+                    _build_summary_email(date.today(), 0, db_connected,
+                                         db_result, [], summary),
                 )
         return result
 
