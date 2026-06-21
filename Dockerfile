@@ -19,6 +19,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# fluxbox tries to set a desktop wallpaper via `fbsetbg` on startup; with no
+# wallpaper tool installed it pops an xmessage error dialog over the noVNC
+# console. We don't need a wallpaper in a headless VNC session, so replace
+# fbsetbg with a no-op (the `overlay: background: none` resource is not honored
+# by this fluxbox build).
+RUN printf '#!/bin/sh\nexit 0\n' > /usr/bin/fbsetbg && chmod +x /usr/bin/fbsetbg
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

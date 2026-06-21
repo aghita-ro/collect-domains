@@ -14,6 +14,10 @@ import time
 import os
 import json
 import argparse
+import re
+import imaplib
+import email
+from email.utils import parsedate_to_datetime
 import requests as http_requests
 from datetime import date
 import calendar
@@ -42,6 +46,12 @@ DB_PORT = int(os.getenv("DB_PORT", "5432"))
 DB_NAME = os.getenv("DB_NAME", "")
 DB_USER = os.getenv("DB_USER", "")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+
+# Gmail IMAP — used to auto-read the eureg.ro 2FA login code (sent by email).
+# Requires a Google "App Password" (account must have 2-Step Verification on).
+GMAIL_IMAP_USER = os.getenv("GMAIL_IMAP_USER", "")
+GMAIL_IMAP_PASSWORD = os.getenv("GMAIL_IMAP_PASSWORD", "")
+GMAIL_IMAP_HOST = os.getenv("GMAIL_IMAP_HOST", "imap.gmail.com")
 
 # Try to import psycopg2
 try:
@@ -77,6 +87,85 @@ def send_alert_email(subject, body):
     except Exception as e:
         print(f"✗ Failed to send alert email: {str(e)}")
         return False
+
+
+# eureg.ro 2FA emails arrive from noreply@eureg.ro and contain a code formatted
+# like "RW-667076" — the MFA field only accepts the 6 digits (the 2-letter prefix
+# is shown on the page only so the user can confirm the right email).
+_MFA_CODE_RE = re.compile(r"[A-Z]{2}-(\d{6})")
+_MFA_DIGITS_RE = re.compile(r"\b(\d{6})\b")
+
+
+def _email_body_text(msg):
+    """Return the concatenated decoded text of all parts of an email.Message."""
+    chunks = []
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_maintype() == "multipart":
+                continue
+            try:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    chunks.append(payload.decode(part.get_content_charset() or "utf-8", "ignore"))
+            except Exception:
+                continue
+    else:
+        try:
+            payload = msg.get_payload(decode=True)
+            if payload:
+                chunks.append(payload.decode(msg.get_content_charset() or "utf-8", "ignore"))
+        except Exception:
+            pass
+    return "\n".join(chunks)
+
+
+def fetch_2fa_code(since_epoch, timeout=180, poll_interval=5):
+    """Poll Gmail (IMAP) for an eureg.ro 2FA code newer than since_epoch.
+
+    Returns the 6-digit code string, or None if not configured / not found in time.
+    """
+    if not GMAIL_IMAP_USER or not GMAIL_IMAP_PASSWORD:
+        print("  ✗ Gmail IMAP not configured (GMAIL_IMAP_USER/PASSWORD) - cannot auto-read 2FA code")
+        return None
+
+    deadline = time.time() + timeout
+    # IMAP SINCE is date-granular; subtract a day to avoid timezone edge cases.
+    since_str = time.strftime("%d-%b-%Y", time.gmtime(since_epoch - 86400))
+    print(f"  Reading 2FA code from {GMAIL_IMAP_USER} via IMAP...")
+
+    while time.time() < deadline:
+        try:
+            M = imaplib.IMAP4_SSL(GMAIL_IMAP_HOST)
+            M.login(GMAIL_IMAP_USER, GMAIL_IMAP_PASSWORD)
+            M.select("INBOX")
+            typ, data = M.search(None, f'(FROM "eureg.ro" SINCE {since_str})')
+            best = None  # (epoch, code)
+            if typ == "OK" and data and data[0]:
+                for mid in reversed(data[0].split()[-15:]):
+                    typ, msgdata = M.fetch(mid, "(RFC822)")
+                    if typ != "OK" or not msgdata or not msgdata[0]:
+                        continue
+                    msg = email.message_from_bytes(msgdata[0][1])
+                    try:
+                        ep = parsedate_to_datetime(msg["Date"]).timestamp()
+                    except Exception:
+                        ep = 0
+                    if ep < since_epoch - 90:
+                        continue  # older than our login attempt — skip stale codes
+                    body = _email_body_text(msg)
+                    m = _MFA_CODE_RE.search(body) or _MFA_DIGITS_RE.search(body)
+                    if m and (best is None or ep > best[0]):
+                        best = (ep, m.group(1))
+            M.logout()
+            if best:
+                print(f"  ✓ 2FA code retrieved from email")
+                return best[1]
+        except Exception as e:
+            print(f"  IMAP error: {e}")
+        time.sleep(poll_interval)
+
+    print("  ✗ No fresh 2FA code arrived within timeout")
+    return None
 
 
 class DomainsScrapperSelenium:
@@ -305,11 +394,18 @@ class DomainsScrapperSelenium:
             if '/login' in url_path or '/conectare' in url_path:
                 print("  ✗ Not logged in (on login page)")
                 return False
-            
+
+            # The MFA page also has a "Deconectare" link, so it must be checked
+            # BEFORE the logout-link fallback — otherwise we'd report a half-logged-in
+            # (code not yet entered) session as valid and the scrape would get 0 rows.
+            if '/mfa' in url_path:
+                print("  ✗ Not fully logged in (on MFA / 2FA page)")
+                return False
+
             if '/dashboard' in url_path:
                 print("  ✓ Already logged in (on dashboard)")
                 return True
-            
+
             # Fallback: check for logout link
             try:
                 logout_link = self.driver.find_element(By.PARTIAL_LINK_TEXT, "Deconectare")
@@ -317,14 +413,99 @@ class DomainsScrapperSelenium:
                 return True
             except:
                 pass
-            
+
             print("  ✗ Login status unclear")
             return False
-            
+
         except Exception as e:
             print(f"  ✗ Error checking login: {str(e)}")
             return False
-    
+
+    def complete_mfa(self, since_epoch):
+        """On the eureg MFA page: read the emailed code and submit it.
+
+        `since_epoch` is when we navigated to the MFA page (the code is sent on
+        page load); only codes newer than that are accepted. Returns True on success.
+        """
+        print("\n  MFA / 2FA step detected — completing automatically...")
+        code = fetch_2fa_code(since_epoch=since_epoch - 30, timeout=180)
+        if not code:
+            return False
+        try:
+            field = self.wait.until(EC.presence_of_element_located((By.NAME, "passcode")))
+            self.driver.execute_script("arguments[0].value = '';", field)
+            field.click()
+            field.send_keys(code)
+            self.driver.find_element(By.CSS_SELECTOR, "button[type=submit]").click()
+            for _ in range(20):
+                time.sleep(1)
+                if '/mfa' not in urlparse(self.driver.current_url).path.lower():
+                    print(f"  ✓ MFA completed — now at {self.driver.current_url}")
+                    self.save_cookies()
+                    return True
+            print("  ✗ MFA code submitted but still on MFA page (expired/invalid?)")
+            return False
+        except Exception as e:
+            print(f"  ✗ MFA completion error: {str(e)}")
+            return False
+
+    def _credential_login(self):
+        """Fill username/password and submit. The login page has an invisible
+        reCAPTCHA that usually passes silently (persistent profile + stable IP);
+        if Google raises a challenge this returns False and manual login is needed.
+        Returns the resulting URL path, or None on failure."""
+        print("\n  Performing credential login...")
+        self.driver.get(f"{self.base_url}/ro/clienti/login")
+        time.sleep(2)
+        self.accept_cookies()
+        username_field = self.wait.until(EC.presence_of_element_located((By.ID, "login")))
+        self._fill_field(username_field, self.username)
+        self._fill_field(self.driver.find_element(By.ID, "pass"), self.password)
+        time.sleep(1)
+        self.driver.find_element(By.ID, "login-button").click()
+        for _ in range(20):
+            time.sleep(1)
+            path = urlparse(self.driver.current_url).path.lower()
+            if '/mfa' in path or '/dashboard' in path:
+                return path
+        return urlparse(self.driver.current_url).path.lower()
+
+    def ensure_logged_in(self):
+        """Make sure we end up on the dashboard, automatically handling the MFA
+        email-code step (and a credential login if cookies have fully expired).
+        Returns True if logged in, False if manual intervention is required."""
+        try:
+            nav = time.time()
+            self.load_cookies()
+            self.driver.get(f"{self.base_url}/ro/clienti/dashboard")
+            time.sleep(3)
+            path = urlparse(self.driver.current_url).path.lower()
+            print(f"  Current URL: {self.driver.current_url}")
+
+            if '/dashboard' in path:
+                print("  ✓ Already logged in (dashboard)")
+                return True
+
+            # Cookies expired entirely → try a full credential login first.
+            if '/login' in path or '/conectare' in path:
+                nav = time.time()
+                path = self._credential_login()
+
+            # Either the cookies landed us on MFA, or the credential login did.
+            if '/mfa' in path:
+                if self.complete_mfa(since_epoch=nav):
+                    return True
+                return False
+
+            if '/dashboard' in path:
+                return True
+
+            print("  ✗ Could not reach dashboard (likely reCAPTCHA challenge on login)")
+            return False
+        except Exception as e:
+            print(f"  ✗ ensure_logged_in error: {str(e)}")
+            return False
+
     def accept_cookies(self):
         """Accept cookie consent if present"""
         try:
@@ -557,16 +738,17 @@ def run_scrape_job(cron=True):
         scraper = DomainsScrapperSelenium(username, password, headless=False)
         db_connected = scraper.connect_db()
 
-        if not scraper.is_logged_in():
+        if not scraper.ensure_logged_in():
             result["session_valid"] = False
             result["status"] = "login_required"
-            print("\n✗ Session expired - manual login required")
+            print("\n✗ Session expired - automatic login failed, manual login required")
             if cron:
                 send_alert_email(
                     "Domains Scrapper: login required",
-                    "The session has expired and manual login is needed.\n\n"
+                    "Automatic login (incl. email 2FA) failed — likely a reCAPTCHA\n"
+                    "challenge on the login page.\n\n"
                     "Open the noVNC console (private/VPN), then trigger POST /login\n"
-                    "and complete the email verification / CAPTCHA in the browser.\n\n"
+                    "and complete the verification in the browser.\n\n"
                     "The next scheduled run will work again afterwards."
                 )
             return result
@@ -633,10 +815,13 @@ def run_login_job(wait_seconds=600):
     scraper = None
     try:
         scraper = DomainsScrapperSelenium(username, password, headless=False)
-        if scraper.is_logged_in():
-            print("\n✓ Already logged in - nothing to do")
+        # Try the fully automatic path first (cookies + email 2FA). Only fall back
+        # to the manual noVNC flow if that fails (e.g. a reCAPTCHA challenge).
+        if scraper.ensure_logged_in():
+            print("\n✓ Logged in automatically - nothing to do")
             result["success"] = True
             return result
+        print("\n⚠ Automatic login failed - falling back to manual login (watch via noVNC)")
         result["success"] = scraper.login_manual(wait_seconds=wait_seconds)
         return result
     except Exception as e:
